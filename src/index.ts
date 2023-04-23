@@ -7,7 +7,7 @@ import * as dotenv from "dotenv";
 dotenv.config();
 
 const DOWNLOAD_DIRECTORY = path.join(__dirname, '..', 'photos');
-const delayInMs = 3000; // 3 секунд задержки между скачиваниями фотографий
+const delayInMs = 100; // 3 секунд задержки между скачиваниями фотографий
 export const token: string | undefined = process.env.token; //root user
 const vk = new VK({
   token: token!
@@ -28,30 +28,34 @@ async function ensureDirectoryExists(dirPath: string): Promise<void> {
   }
 }
 
-async function getAllDialogs(): Promise<number[]> {
-  const { items: dialogs } = await vk.api.messages.getConversations({ count: 200 });
-
-  return dialogs
-    .filter(dialog => dialog.conversation.peer.type === 'user')
-    .map(dialog => dialog.conversation.peer.id);
+async function* getAllDialogs(): AsyncGenerator<number[], void, undefined> {
+  let nextFrom = '';
+  while (nextFrom !== undefined) {
+    const { items: dialogs, next_from } = await vk.api.messages.getConversations({ count: 200, start_from: nextFrom });
+    nextFrom = next_from;
+    yield dialogs.filter(dialog => dialog.conversation.peer.type === 'user').map(dialog => dialog.conversation.peer.id);
+  }
 }
 
-async function getAllPhotosFromDialog(dialogId: number): Promise<string[]> {
-  const { items: messages } = await vk.api.messages.getHistoryAttachments({
-    peer_id: dialogId,
-    media_type: 'photo',
-    count: 200
-  });
-  return messages.map(message => message.attachment.photo.sizes.pop().url);
+async function* getAllPhotosFromDialog(dialogId: number): AsyncGenerator<string[], void, undefined> {
+  let nextFrom = '';
+  while (nextFrom !== undefined) {
+    const { items: messages, next_from } = await vk.api.messages.getHistoryAttachments({
+      peer_id: dialogId,
+      media_type: 'photo',
+      count: 200,
+      start_from: nextFrom,
+    });
+    nextFrom = next_from;
+    yield messages.map(message => message.attachment.photo.sizes.pop().url);
+  }
 }
-
-
 
 async function downloadPhoto(url: string, filename: string) {
   const name = filename.split('?')[0];
   const filePath = path.join(DOWNLOAD_DIRECTORY, name);
   if (fs.existsSync(filePath)) {
-    console.log(`AlreadyExists ${filename}`);
+    console.log(`AlreadyExists ${url}`);
     return
   }
   return new Promise<void>((resolve, reject) => {
@@ -79,17 +83,26 @@ async function downloadPhotosWithDelay(urls: string[], delayInMs: number): Promi
 
 (async () => {
   await ensureDirectoryExists(DOWNLOAD_DIRECTORY);
-  const dialogs = await getAllDialogs();
-  console.log(`Found ${dialogs.length} dialogs with users`);
-
-  for (const dialogId of dialogs) {
-    console.log(`Processing dialog with user ${dialogId}`);
-    const photos = await getAllPhotosFromDialog(dialogId);
-    console.log(`Found ${photos.length} photos`);
-    if (photos.length > 0) {
-      await downloadPhotosWithDelay(photos, delayInMs);
+  const dialogsGenerator = getAllDialogs();
+  let dialogs = await dialogsGenerator.next();
+  let count = 0;
+  while (!dialogs.done) {
+    console.log(`Found ${dialogs.value.length} dialogs with users`);
+    for (const dialogId of dialogs.value) {
+      console.log(`Processing dialog with user ${dialogId}`);
+      const photosGenerator = getAllPhotosFromDialog(dialogId);
+      let photos = await photosGenerator.next();
+      while (!photos.done) {
+        console.log(`Found ${photos.value.length} photos`);
+        if (photos.value.length > 0) {
+          await downloadPhotosWithDelay(photos.value, delayInMs);
+        }
+        photos = await photosGenerator.next();
+      }
     }
+    dialogs = await dialogsGenerator.next();
+    count++;
+    console.log(`Finished processing ${count} batch(es) of dialogs`);
   }
-
   console.log('All photos have been downloaded.');
 })();

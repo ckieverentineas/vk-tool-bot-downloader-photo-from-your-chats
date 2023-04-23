@@ -4,6 +4,7 @@ import * as path from 'path';
 import { promisify } from 'util';
 import * as https from "https";
 import * as dotenv from "dotenv";
+import { MessagesConversationWithMessage } from 'vk-io/lib/api/schemas/objects';
 dotenv.config();
 
 const DOWNLOAD_DIRECTORY = path.join(__dirname, '..', 'photos');
@@ -28,30 +29,30 @@ async function ensureDirectoryExists(dirPath: string): Promise<void> {
   }
 }
 
-async function* getAllDialogs(): AsyncGenerator<number[], void, undefined> {
+async function* getAllDialogs(): AsyncGenerator<MessagesConversationWithMessage[], void, undefined> {
   let nextFrom = '';
   while (nextFrom !== undefined) {
     const { items: dialogs, next_from } = await vk.api.messages.getConversations({ count: 200, start_from: nextFrom });
     nextFrom = next_from;
-    const userDialogIds = dialogs.filter(dialog => dialog.conversation.peer.type === 'user').map(dialog => dialog.conversation.peer.id);
-    for (const dialogId of userDialogIds) {
-      const dialogDirectory = path.join(DOWNLOAD_DIRECTORY, `${dialogId}`);
+    for (const dialog of dialogs) {
+      const dialogDirectory = path.join(DOWNLOAD_DIRECTORY, `${dialog.conversation.peer.type}s`, `${dialog.conversation.peer.id}`);
       await ensureDirectoryExists(dialogDirectory);
-      const photosGenerator = getAllPhotosFromDialog(dialogId);
+      const photosGenerator = getAllPhotosFromDialog(dialog);
       let photos = await photosGenerator.next();
       while (!photos.done) {
-        console.log(`Found ${photos.value.length} photos for dialog ${dialogId}`);
+        console.log(`Found ${photos.value.length} photos for dialog ${dialog.conversation.peer.id}`);
         photos = await photosGenerator.next();
       }
     }
-    yield userDialogIds;
+    yield dialogs;
   }
 }
-async function* getAllPhotosFromDialog(dialogId: number): AsyncGenerator<string[], void, undefined> {
+
+async function* getAllPhotosFromDialog(dialog: MessagesConversationWithMessage): AsyncGenerator<string[], void, undefined> {
   let nextFrom = '';
   while (nextFrom !== undefined) {
     const { items: messages, next_from } = await vk.api.messages.getHistoryAttachments({
-      peer_id: dialogId,
+      peer_id: dialog.conversation.peer.id,
       media_type: 'photo',
       count: 200,
       start_from: nextFrom,
@@ -60,14 +61,14 @@ async function* getAllPhotosFromDialog(dialogId: number): AsyncGenerator<string[
     
     const photoUrls = messages.map(message => message.attachment.photo.sizes.pop().url);
     if (photoUrls.length > 0) {
-      await downloadPhotosWithDelay(photoUrls, delayInMs, dialogId);
+      await downloadPhotosWithDelay(photoUrls, delayInMs, dialog.conversation.peer.id, dialog.conversation.peer.type);
       yield photoUrls;
     }
   }
 }
 
-async function downloadPhotosWithDelay(urls: string[], delayInMs: number, dialogId: number): Promise<void> {
-  const dialogDirectory = path.join(DOWNLOAD_DIRECTORY, `${dialogId}`);
+async function downloadPhotosWithDelay(urls: string[], delayInMs: number, dialogId: number, dialogType: string): Promise<void> {
+  const dialogDirectory = path.join(DOWNLOAD_DIRECTORY, `${dialogType}s`, `${dialogId}`);
   await ensureDirectoryExists(dialogDirectory);
   for (const url of urls) {
     const filename = path.basename(url);
@@ -99,15 +100,15 @@ async function downloadPhotosWithDelay(urls: string[], delayInMs: number, dialog
   let dialogs = await dialogsGenerator.next();
   let count = 0;
   while (!dialogs.done) {
-    console.log(`Found ${dialogs.value.length} dialogs with users`);
-    for (const dialogId of dialogs.value) {
-      console.log(`Processing dialog with user ${dialogId}`);
-      const photosGenerator = getAllPhotosFromDialog(dialogId);
+    console.log(`Found ${dialogs.value.length} dialogs`);
+    for (const dialog of dialogs.value) {
+      console.log(`Processing dialog with ${dialog.conversation.peer.type} ${dialog.conversation.peer.id}`);
+      const photosGenerator = getAllPhotosFromDialog(dialog.conversation.peer.id);
       let photos = await photosGenerator.next();
       while (!photos.done) {
         console.log(`Found ${photos.value.length} photos`);
         if (photos.value.length > 0) {
-          await downloadPhotosWithDelay(photos.value, delayInMs, dialogId);
+          await downloadPhotosWithDelay(photos.value, delayInMs, dialog.conversation.peer.id, dialog.conversation.peer.type);
         }
         photos = await photosGenerator.next();
       }
